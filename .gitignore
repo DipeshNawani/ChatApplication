@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+server/data/
+server/.env
+clients/electron/node_modules/
+clients/electron/dist/
+clients/pyqt/build/
+clients/pyqt/dist/
+build/
+dist/
+server/.pytest_cache/

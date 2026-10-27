@@ -1,0 +1,24 @@
+{
+  "name": "quantumbytes-chat-electron",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/app.js && node --check test/socket-probe.js && node --test test/*.test.js",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "electron": "^42.11.16",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.quantumbytes.chat",
+    "productName": "QuantumBytes Chat",
+    "win": { "target": ["zip"] },
+    "files": ["src/**/*", "package.json"]
+  }
+}

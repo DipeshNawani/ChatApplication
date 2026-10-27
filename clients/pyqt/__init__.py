@@ -1,0 +1,1 @@
+"""PyQt6 desktop client for QuantumBytes Chat."""

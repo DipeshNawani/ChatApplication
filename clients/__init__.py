@@ -1,0 +1,1 @@
+"""Desktop clients for QuantumBytes Chat."""

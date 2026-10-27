@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: quantumbytes-chat
+    runtime: python
+    plan: free
+    buildCommand: python -m pip install -r server/requirements.txt
+    startCommand: python -m alembic -c server/alembic.ini upgrade head && python -m uvicorn app.main:socket_app --app-dir server --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRE_MINUTES
+        value: 60
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        value: http://localhost,http://127.0.0.1
+      - key: TRUST_PROXY_HEADERS
+        value: true
+      - key: MAX_GROUP_MEMBERS
+        value: 50
+      - key: UPLOAD_DIRECTORY
+        value: /tmp/quantumbytes-uploads
