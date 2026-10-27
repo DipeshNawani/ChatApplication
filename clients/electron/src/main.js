@@ -31,6 +31,15 @@ function normalizeUrl(value) {
   return (trimmed.includes('://') ? trimmed : `http://${trimmed}`).replace(/\/$/, '');
 }
 
+function normalizeErrorPayload(payload) {
+  if (!payload) return { code: 'REQUEST_FAILED', message: 'Request failed' };
+  if (typeof payload === 'string') return { code: 'REQUEST_FAILED', message: payload };
+  if (payload.error && typeof payload.error === 'object') return payload.error;
+  if (payload.detail && typeof payload.detail === 'object') return payload.detail;
+  if (payload.code || payload.message) return payload;
+  return { code: 'REQUEST_FAILED', message: 'Request failed' };
+}
+
 async function apiRequest(pathname, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), pathname.startsWith('/api/v1/auth/') ? 90000 : 15000);
@@ -40,8 +49,13 @@ async function apiRequest(pathname, options = {}) {
       signal: controller.signal,
       headers: { ...(options.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     });
-    const body = await response.json();
-    if (!response.ok) throw body.error || body.detail || { code: 'REQUEST_FAILED', message: 'Request failed' };
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = normalizeErrorPayload(body);
+      const error = new Error(detail.message || 'Request failed');
+      error.code = detail.code || 'REQUEST_FAILED';
+      throw error;
+    }
     return body;
   } finally {
     clearTimeout(timeout);
@@ -152,7 +166,13 @@ ipcMain.handle('file:upload', async (_event, filePath) => {
 });
 ipcMain.handle('file:download', async (_event, fileId, filename) => {
   const response = await fetch(`${serverUrl}/api/v1/files/${encodeURIComponent(fileId)}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30000) });
-  if (!response.ok) { const result = await response.json(); throw result.error || result.detail; }
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    const detail = normalizeErrorPayload(result);
+    const error = new Error(detail.message || 'Request failed');
+    error.code = detail.code || 'REQUEST_FAILED';
+    throw error;
+  }
   const choice = await dialog.showSaveDialog(windowRef, { defaultPath: filename });
   if (!choice.canceled && choice.filePath) fs.writeFileSync(choice.filePath, Buffer.from(await response.arrayBuffer()));
 });

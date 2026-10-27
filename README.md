@@ -211,5 +211,4 @@ Render's filesystem is **ephemeral**, so uploaded files may be lost after a rest
 **Built by [Dipesh Nawani](https://github.com/DipeshNawani)**
 
 ⭐ If you find this project useful, consider giving it a star!
-
 </div>
