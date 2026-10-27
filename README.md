@@ -1,113 +1,149 @@
 # QuantumBytes Chat
 
-A desktop chat learning project with one FastAPI + Socket.IO server, a PyQt6
-client, and a secure Electron client. Both clients use the same event contract
-in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+QuantumBytes Chat is a desktop messaging application with a shared FastAPI and
+Socket.IO backend, a PyQt6 client, and an Electron client. Both clients use the
+same server API and event protocol.
 
-## Windows setup
+## Features
 
-Run commands from the `quantumbytestask` repository folder.
+- Account registration and login with JWT authentication
+- Direct conversations and group rooms with owner-managed membership
+- Persistent message history, reconnect handling, and duplicate-send protection
+- Typing indicators, online presence, and delivery/read status
+- File and image attachments with type validation and a 5 MiB upload limit
+- PyQt6 and Electron desktop clients
+
+## Architecture
+
+- `server/`: FastAPI, Socket.IO, SQLAlchemy, and Alembic migrations
+- `clients/pyqt/`: PyQt6 desktop application and threaded socket worker
+- `clients/electron/`: Electron application with isolated renderer and preload API
+- `docs/`: architecture, protocol, decisions, and implementation learnings
+
+The local development database is SQLite. Hosted deployments use PostgreSQL,
+including the PostgreSQL database provided by Supabase. See
+[docs/PROTOCOL.md](docs/PROTOCOL.md) for the API and Socket.IO event contract.
+
+## Requirements
+
+- Windows 10 or later for the desktop clients
+- Python 3.13.4, as specified by `.python-version`
+- Node.js and npm to run or package the Electron client
+
+## Local Development
+
+Run the following commands from the repository root in PowerShell:
 
 ```powershell
-python -m venv .venv
+py -3.13 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r server\requirements.txt
 .venv\Scripts\python.exe -m pip install -r clients\pyqt\requirements.txt
 Copy-Item server\.env.example server\.env
 ```
 
-For local development, set `JWT_SECRET` in `server/.env` to a random value of
-at least 32 characters. Keep `DEV_MODE` off; the automated tests monkeypatch
-the test-only identity instead. Then apply migrations and launch:
+Edit `server\.env` and replace the `JWT_SECRET` placeholder with a random
+secret of at least 32 characters. To generate one locally:
+
+```powershell
+.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Keep `DATABASE_PATH=server/data/chat.db` for local SQLite development. Do not
+put a hosted database URL or any real credentials in `config.py`. Apply the
+database migrations and start the server:
 
 ```powershell
 .venv\Scripts\python.exe -m alembic -c server\alembic.ini upgrade head
-.venv\Scripts\python.exe -m uvicorn app.main:socket_app --app-dir server --env-file server/.env --host 127.0.0.1 --port 8000
+.venv\Scripts\python.exe -m uvicorn app.main:socket_app --app-dir server --env-file server\.env --host 127.0.0.1 --port 8000
 ```
 
-### PyQt6 client
-
-In another PowerShell terminal, from the repository folder:
+Leave the server running. In another PowerShell terminal, start the PyQt6
+client:
 
 ```powershell
 .venv\Scripts\python.exe -m clients.pyqt.main
 ```
 
-The settings file stores server URL and username only. Passwords are never
-saved; the JWT remains in memory.
-
-### Electron client
+Or start the Electron client in another terminal:
 
 ```powershell
 Push-Location clients\electron
-npm install
+npm ci
 npm start
 Pop-Location
 ```
 
-## LAN testing
-
-Start the server with `--host 0.0.0.0 --port 8000`. Set the client server URL
-to the server computer's LAN IP, such as `http://192.168.1.20:8000`. Allow
-Python through Windows Defender Firewall on Private networks only.
+Use `http://127.0.0.1:8000` as the server URL in the client. Client settings
+store the server URL and username; passwords are not saved, and authentication
+tokens remain in memory or the Electron main process.
 
 ## Tests
 
+Run Python tests from the repository root:
+
 ```powershell
-$env:PYTHONPATH='server'
-$env:QT_QPA_PLATFORM='offscreen'
-.venv\Scripts\python.exe -m pytest -v server\tests clients\pyqt\tests
+$env:PYTHONPATH = 'server'
+$env:QT_QPA_PLATFORM = 'offscreen'
+.venv\Scripts\python.exe -m pytest -q
+```
+
+Run Electron tests:
+
+```powershell
 Push-Location clients\electron
 npm test
 Pop-Location
 ```
 
-## Package builds
+## Windows Packages
 
-PyQt6:
+Build the PyQt6 executable:
 
 ```powershell
 .venv\Scripts\python.exe -m pip install pyinstaller
 .venv\Scripts\pyinstaller.exe clients\pyqt\QuantumBytesChat.spec
 ```
 
-Electron:
+Build the Electron portable ZIP:
 
 ```powershell
 Push-Location clients\electron
+npm ci
 npm run dist
 Pop-Location
 ```
 
-This builds a portable Windows ZIP. The local NSIS build exceeded the
-available memory-mapped archive limit; the target can be switched to NSIS in a
-release build environment with more available memory.
+The Electron build is configured as a portable ZIP. The local NSIS installer
+build exceeded the available memory-mapped archive limit. Packaged Electron
+builds are unsigned; obtain a code-signing certificate before public release.
 
-## Deployment notes
+## Deployment: Render and Supabase
 
-`render.yaml` is a Render Free web-service Blueprint. It runs migrations at
-startup, binds to Render's `PORT`, enables trusted proxy IP handling, and
-requires `DATABASE_URL` from Supabase PostgreSQL. Render Free has an ephemeral
-filesystem, so uploaded files in `UPLOAD_DIRECTORY` disappear on restart or
-redeploy. Use object storage before relying on file persistence.
+The root `render.yaml` defines a Render web-service Blueprint. It installs the
+server dependencies, applies Alembic migrations at startup, and exposes the
+`/health` endpoint. Supabase supplies the hosted PostgreSQL database; a
+separate PostgreSQL installation is not required.
 
-### Steps for Legend
+1. Push this repository to GitHub and create a Blueprint in Render from it.
+2. In Supabase, open **Connect** and copy a PostgreSQL connection URI. Use the
+   Session pooler URI for the Render connection when available. Replace its
+   password placeholder with the Supabase database password.
+3. In the Render service's **Environment** settings, set `DATABASE_URL` to
+   that complete URI. Do not put it in `config.py`, commit it, or use Supabase
+   API keys in its place.
+4. Keep the Blueprint-generated `JWT_SECRET`. Keep `DEV_MODE` disabled. The
+   Blueprint provides the remaining defaults, including `PORT` handling and
+   trusted proxy configuration.
+5. Deploy and confirm that `https://<your-render-service>/health` returns
+   `{"status":"ok","dev_mode":false}`.
+6. Enter the Render HTTPS service URL in the Server URL field in each desktop
+   client.
 
-1. Create a Supabase project and copy its PostgreSQL connection URI. Use the
-   session pooler URI if the direct endpoint is not reachable from Render.
-2. Create/import the `render.yaml` Blueprint in Render.
-3. In the Render service environment, set `DATABASE_URL` to the Supabase URI,
-   set `CORS_ORIGINS` to the approved origins (no wildcard), and verify
-   `DEV_MODE=false` and a generated `JWT_SECRET` of at least 32 characters.
-4. Deploy and wait for `/health` to return `{"status":"ok","dev_mode":false}`.
-5. Set the hosted HTTPS URL in both desktop clients and test login, direct and
-   group chat, reconnect, and upload limits.
-6. Configure Supabase Storage or another persistent object store before
-   expecting uploaded files to survive Render restarts.
-7. For packaged desktop builds, use the commands in Package builds above;
-   configure the hosted URL in each app's settings screen.
-8. The Electron installer is unsigned because no code-signing certificate is
-   available. Windows may show SmartScreen warnings; a release publisher must
-   sign the installer before public distribution.
+Do not commit `.env` files, JWT secrets, database URLs, passwords, or access
+tokens. If a credential has been exposed, rotate it before deployment.
 
-Do not commit `.env`, JWT secrets, Supabase connection strings, user passwords,
-or access tokens.
+Render's filesystem is ephemeral, so uploaded files may be lost after a
+restart or redeploy. Configure persistent object storage before relying on
+hosted file retention. See [docs/PROGRESS.md](docs/PROGRESS.md) for current
+deployment status and [server/README.md](server/README.md) for server-specific
+notes.
