@@ -1,15 +1,18 @@
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QKeyEvent
-from PyQt6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QListWidgetItem, QMainWindow, QStackedWidget, QTextEdit
 
 from .auth_client import AuthWorker
 from .network_worker import SocketWorker
 from .settings import load_settings, save_settings
+from .theme import STYLESHEET, initials
+from .ui import ChatInterface
 
 
 class MessageEditor(QTextEdit):
@@ -23,11 +26,16 @@ class MessageEditor(QTextEdit):
         super().keyPressEvent(event)
 
 
-class ChatWindow(QMainWindow):
+class ChatWindow(ChatInterface, QMainWindow):
+    editor_class = MessageEditor
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("QuantumBytes Chat")
-        self.resize(1100, 720)
+        self.resize(1180, 780)
+        self.setMinimumSize(880, 640)
+        self.setStyleSheet(STYLESHEET)
+        self._auth_workers: set[AuthWorker] = set()
         self.settings = load_settings()
         self.worker: SocketWorker | None = None
         self.auth_worker: AuthWorker | None = None
@@ -48,134 +56,45 @@ class ChatWindow(QMainWindow):
         self._build_login_page()
         self._build_chat_page()
         self.stack.setCurrentWidget(self.login_page)
+        self.resize_timer = QTimer(self)
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.setInterval(100)
+        self.resize_timer.timeout.connect(self.render_current_room)
 
-    def _build_login_page(self) -> None:
-        self.login_page = QWidget()
-        layout = QVBoxLayout(self.login_page)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        form = QWidget()
-        form.setMaximumWidth(420)
-        form_layout = QVBoxLayout(form)
-        title = QLabel("QuantumBytes Chat")
-        title.setStyleSheet("font-size: 28px; font-weight: 700;")
-        form_layout.addWidget(title)
-        form_layout.addWidget(QLabel("Sign in or create an account"))
-        self.server_url_input = QLineEdit(self.settings["server_url"])
-        self.server_url_input.setPlaceholderText("Server URL")
-        self.username_input = QLineEdit(self.settings["username"])
-        self.username_input.setPlaceholderText("Username")
-        self.password_input = QLineEdit()
-        self.password_input.setPlaceholderText("Password")
-        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        buttons = QHBoxLayout()
-        login_button = QPushButton("Login")
-        login_button.clicked.connect(lambda: self.authenticate("login"))
-        register_button = QPushButton("Register")
-        register_button.clicked.connect(lambda: self.authenticate("register"))
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.cancel_connection)
-        self.cancel_button.setEnabled(False)
-        buttons.addWidget(login_button)
-        buttons.addWidget(register_button)
-        buttons.addWidget(self.cancel_button)
-        self.login_status = QLabel("Offline")
-        self.login_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.login_error = QLabel("")
-        self.login_error.setWordWrap(True)
-        self.login_error.setStyleSheet("color: #b42318;")
-        form_layout.addWidget(self.server_url_input)
-        form_layout.addWidget(self.username_input)
-        form_layout.addWidget(self.password_input)
-        form_layout.addLayout(buttons)
-        form_layout.addWidget(self.login_status)
-        form_layout.addWidget(self.login_error)
-        layout.addWidget(form)
-        self.stack.addWidget(self.login_page)
+    def _start_auth_worker(self, worker: AuthWorker) -> None:
+        # Keep each request alive until its thread finishes, including overlapping requests.
+        self._auth_workers.add(worker)
+        worker.finished.connect(lambda: self._auth_workers.discard(worker))
+        worker.start()
 
-    def _build_chat_page(self) -> None:
-        self.chat_page = QWidget()
-        root = QHBoxLayout(self.chat_page)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        root.addWidget(splitter)
-        sidebar = QWidget()
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.addWidget(QLabel("Chats"))
-        self.room_list = QListWidget()
-        general_item = QListWidgetItem("general")
-        general_item.setData(Qt.ItemDataRole.UserRole, "general")
-        self.room_list.addItem(general_item)
-        self.room_list.currentItemChanged.connect(self.select_room)
-        sidebar_layout.addWidget(self.room_list)
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search username")
-        search_button = QPushButton("Search")
-        search_button.clicked.connect(self.search_users)
-        sidebar_layout.addWidget(self.search_input)
-        sidebar_layout.addWidget(search_button)
-        self.search_results = QListWidget()
-        self.search_results.itemClicked.connect(self.open_direct_chat)
-        sidebar_layout.addWidget(self.search_results)
-        self.group_name_input = QLineEdit()
-        self.group_name_input.setPlaceholderText("New group name")
-        group_button = QPushButton("Create group")
-        group_button.clicked.connect(self.create_group)
-        self.member_input = QLineEdit()
-        self.member_input.setPlaceholderText("Member username")
-        add_member_button = QPushButton("Add member")
-        add_member_button.clicked.connect(self.add_group_member)
-        leave_button = QPushButton("Leave group")
-        leave_button.clicked.connect(self.leave_group)
-        sidebar_layout.addWidget(self.group_name_input)
-        sidebar_layout.addWidget(group_button)
-        sidebar_layout.addWidget(self.member_input)
-        sidebar_layout.addWidget(add_member_button)
-        sidebar_layout.addWidget(leave_button)
-        splitter.addWidget(sidebar)
+    def clear_session(self) -> None:
+        self.current_room = "general"
+        self.room_messages = {"general": []}
+        self.seen_message_ids.clear()
+        self.read_message_ids.clear()
+        self.last_sequence_by_room.clear()
+        self.room_list.blockSignals(True)
+        for index in reversed(range(self.room_list.count())):
+            if self.room_list.item(index).data(Qt.ItemDataRole.UserRole) != "general":
+                self.room_list.takeItem(index)
+        self.room_list.setCurrentRow(0)
+        self.room_list.blockSignals(False)
+        self.search_results.clear()
+        self.search_results.hide()
+        self.refresh_rooms()
+        self.update_header()
+        self.composer.clear()
+        self.render_current_room()
 
-        chat = QWidget()
-        chat_layout = QVBoxLayout(chat)
-        header = QHBoxLayout()
-        self.room_title = QLabel("general")
-        self.room_title.setStyleSheet("font-size: 18px; font-weight: 700;")
-        self.chat_status = QLabel("Offline")
-        self.presence_status = QLabel("")
-        header.addWidget(self.room_title)
-        header.addStretch()
-        header.addWidget(self.presence_status)
-        header.addWidget(self.chat_status)
-        chat_layout.addLayout(header)
-        self.typing_status = QLabel("")
-        chat_layout.addWidget(self.typing_status)
-        self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: #b42318;")
-        chat_layout.addWidget(self.error_label)
-        self.message_area = QScrollArea()
-        self.message_area.setWidgetResizable(True)
-        self.message_container = QWidget()
-        self.message_layout = QVBoxLayout(self.message_container)
-        self.message_layout.addStretch()
-        self.message_area.setWidget(self.message_container)
-        chat_layout.addWidget(self.message_area)
-        composer = QHBoxLayout()
-        self.composer = MessageEditor()
-        self.composer.setPlaceholderText("Write a message... (Enter sends, Shift+Enter adds a line)")
-        self.composer.setFixedHeight(70)
-        self.composer.send_requested.connect(self.send_message)
-        self.composer.textChanged.connect(self.typing_changed)
-        send_button = QPushButton("Send")
-        send_button.clicked.connect(self.send_message)
-        attach_button = QPushButton("Attach file")
-        attach_button.clicked.connect(self.choose_file)
-        composer.addWidget(self.composer)
-        composer.addWidget(attach_button)
-        composer.addWidget(send_button)
-        chat_layout.addLayout(composer)
-        splitter.addWidget(chat)
-        splitter.setStretchFactor(1, 1)
-        self.stack.addWidget(self.chat_page)
+    def member_added(self, payload: dict[str, Any]) -> None:
+        self.member_error.hide()
+        self.member_feedback.setText(f"{self.member_input.text().strip()} was added to the group.")
+        self.member_input.clear()
 
     def normalized_server_url(self) -> str:
         server_url = self.server_url_input.text().strip()
+        if not server_url:
+            return ""
         if "://" not in server_url:
             server_url = f"http://{server_url}"
             self.server_url_input.setText(server_url)
@@ -187,20 +106,30 @@ class ChatWindow(QMainWindow):
         username = self.username_input.text().strip()
         password = self.password_input.text()
         if not server_url or not username or not password:
-            self.login_status.setText("Server URL, username, and password are required")
+            self.auth_failed({"code": "MISSING_DETAILS", "message": "Server address, username, and password are required."})
             return
         save_settings(server_url, username)
         self.login_status.setText("Connecting...")
         self.login_error.clear()
+        self.login_error.hide()
+        self.login_button.setEnabled(False)
+        self.register_button.setEnabled(False)
+        self.cancel_button.show()
         self.cancel_button.setEnabled(True)
         self.auth_worker = AuthWorker(mode, server_url, username, password)
         self.auth_worker.succeeded.connect(self.auth_succeeded)
         self.auth_worker.failed.connect(self.auth_failed)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
     def auth_succeeded(self, payload: dict[str, Any]) -> None:
         self.token = str(payload["access_token"])
+        self.clear_session()
         self.current_username = str(payload["user"]["username"])
+        self.account_name.setText(self.current_username)
+        self.account_avatar.setText(initials(self.current_username))
+        self.login_button.setEnabled(True)
+        self.register_button.setEnabled(True)
+        self.cancel_button.hide()
         self.password_input.clear()
         self.login_status.setText("Connected")
         self.cancel_button.setEnabled(True)
@@ -220,13 +149,21 @@ class ChatWindow(QMainWindow):
 
     def auth_failed(self, error: dict[str, Any]) -> None:
         self.cancel_button.setEnabled(False)
-        self.login_status.setText("Offline")
+        mode = self.auth_worker.mode if self.auth_worker else "login"
+        self.login_status.setText("Registration unsuccessful" if mode == "register" else "Sign-in unsuccessful")
+        self.login_error.show()
+        self.login_button.setEnabled(True)
+        self.register_button.setEnabled(True)
+        self.cancel_button.hide()
         self.login_error.setText(f"{error.get('code', 'AUTH_ERROR')}: {error.get('message', 'Authentication failed')}")
 
     def cancel_connection(self) -> None:
-        if self.auth_worker and self.auth_worker.isRunning():
-            self.auth_worker.quit()
-            self.auth_worker.wait(3000)
+        for request_worker in list(self._auth_workers):
+            for signal in (request_worker.succeeded, request_worker.failed):
+                try:
+                    signal.disconnect()
+                except TypeError:
+                    pass
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(3000)
@@ -234,15 +171,22 @@ class ChatWindow(QMainWindow):
         self.worker = None
         self.cancel_button.setEnabled(False)
         self.login_status.setText("Offline")
+        self.login_button.setEnabled(True)
+        self.register_button.setEnabled(True)
+        self.cancel_button.hide()
 
     def authentication_failed(self, reason: str) -> None:
         self.login_error.setText(f"{reason}: Please log in again")
+        self.login_error.show()
         self.cancel_connection()
         self.stack.setCurrentWidget(self.login_page)
 
     def connection_state_changed(self, state: str) -> None:
         self.login_status.setText(state)
         self.chat_status.setText(state)
+        self.chat_status.setProperty("online", state == "Connected")
+        self.chat_status.style().unpolish(self.chat_status)
+        self.chat_status.style().polish(self.chat_status)
         if state == "Connected":
             self.stack.setCurrentWidget(self.chat_page)
             self.load_rooms()
@@ -256,8 +200,9 @@ class ChatWindow(QMainWindow):
     def select_room(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
         del previous
         if current:
+            self.stop_typing()
             self.current_room = str(current.data(Qt.ItemDataRole.UserRole) or current.text())
-            self.room_title.setText(self.current_room)
+            self.update_header()
             self.room_messages.setdefault(self.current_room, [])
             self.render_current_room()
             if self.worker:
@@ -268,21 +213,22 @@ class ChatWindow(QMainWindow):
         if not query or not self.token:
             return
         self.search_results.clear()
+        self.search_results.show()
         self.auth_worker = AuthWorker("search", self.normalized_server_url(), token=self.token, query=query)
         self.auth_worker.succeeded.connect(self.show_search_results)
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
     def load_rooms(self) -> None:
         self.auth_worker = AuthWorker("rooms", self.normalized_server_url(), token=self.token)
         self.auth_worker.succeeded.connect(self.show_rooms)
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
     def show_rooms(self, payload: dict[str, Any]) -> None:
         for room in payload.get("rooms", []):
             if room.get("room_id") != "general":
-                self.add_room(room["room_id"], room["name"])
+                self.add_room(room["room_id"], room["name"], select=False)
 
     def create_group(self) -> None:
         name = self.group_name_input.text().strip()
@@ -291,7 +237,7 @@ class ChatWindow(QMainWindow):
         self.auth_worker = AuthWorker("group", self.normalized_server_url(), token=self.token, query=name)
         self.auth_worker.succeeded.connect(lambda payload: self.add_room(payload["room"]["room_id"], payload["room"]["name"]))
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
     def add_group_member(self) -> None:
         username = self.member_input.text().strip()
@@ -299,17 +245,19 @@ class ChatWindow(QMainWindow):
             return
         self.auth_worker = AuthWorker("member", self.normalized_server_url(), username=username, token=self.token, query=self.current_room)
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self.auth_worker.succeeded.connect(self.member_added)
+        self._start_auth_worker(self.auth_worker)
 
     def leave_group(self) -> None:
         if not self.token or not self.current_room.startswith("group-"):
             return
         self.auth_worker = AuthWorker("leave", self.normalized_server_url(), token=self.token, query=self.current_room)
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
     def show_search_results(self, payload: dict[str, Any]) -> None:
         self.search_results.clear()
+        self.search_results.show()
         for user in payload.get("users", []):
             item = QListWidgetItem(user["username"])
             item.setData(Qt.ItemDataRole.UserRole, user["username"])
@@ -320,20 +268,27 @@ class ChatWindow(QMainWindow):
         self.auth_worker = AuthWorker("direct", self.normalized_server_url(), token=self.token, query=username)
         self.auth_worker.succeeded.connect(lambda payload: self.add_room(payload["room"]["room_id"], payload["room"]["name"]))
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
-    def add_room(self, room_id: str, name: str) -> None:
+    def add_room(self, room_id: str, name: str, select: bool = True) -> None:
         matches = [self.room_list.item(index) for index in range(self.room_list.count()) if self.room_list.item(index).data(Qt.ItemDataRole.UserRole) == room_id]
         if not matches:
-            item = QListWidgetItem(name)
+            item = QListWidgetItem("")
             item.setData(Qt.ItemDataRole.UserRole, room_id)
+            item.setData(Qt.ItemDataRole.UserRole + 1, name)
             self.room_list.addItem(item)
         else:
             item = matches[0]
-            item.setText(name)
-        self.room_list.setCurrentItem(item)
-        self.current_room = room_id
-        self.room_title.setText(name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, name)
+        self._paint_room(item)
+        self.room_count.setText(f"CONVERSATIONS   {self.room_list.count()}")
+        if select:
+            self.room_list.setCurrentItem(item)
+            self.current_room = room_id
+            self.update_header()
+            if self.group_dialog.isVisible():
+                self.group_dialog.accept()
+                self.group_name_input.clear()
         self.room_messages.setdefault(room_id, [])
         if self.worker:
             self.worker.join_room(room_id)
@@ -341,13 +296,19 @@ class ChatWindow(QMainWindow):
     def receive_room_added(self, payload: dict[str, Any]) -> None:
         data = payload.get("data", {})
         if data.get("room_id") and data.get("name"):
-            self.add_room(data["room_id"], data["name"])
+            self.add_room(data["room_id"], data["name"], select=False)
 
     def receive_room_removed(self, payload: dict[str, Any]) -> None:
         room_id = payload.get("data", {}).get("room_id")
+        for index in reversed(range(self.room_list.count())):
+            if self.room_list.item(index).data(Qt.ItemDataRole.UserRole) == room_id:
+                self.room_list.takeItem(index)
+        self.room_messages.pop(room_id, None)
+        self.members_dialog.accept()
+        self.refresh_rooms()
         if room_id == self.current_room:
             self.current_room = "general"
-            self.room_title.setText("general")
+            self.update_header()
             self.render_current_room()
 
     def show_search_error(self, error: dict[str, Any]) -> None:
@@ -358,7 +319,7 @@ class ChatWindow(QMainWindow):
         if not text or not self.worker:
             return
         client_message_id = f"client-{uuid4().hex}"
-        message = {"message_id": None, "client_message_id": client_message_id, "room_id": self.current_room, "sender": {"username": self.current_username}, "mine": True, "kind": "text", "text": text, "status": "pending"}
+        message = {"message_id": None, "client_message_id": client_message_id, "room_id": self.current_room, "sender": {"username": self.current_username}, "mine": True, "kind": "text", "text": text, "occurred_at": datetime.now(timezone.utc).isoformat(), "status": "pending"}
         self.room_messages.setdefault(self.current_room, []).append(message)
         self.render_current_room()
         self.composer.clear()
@@ -374,12 +335,12 @@ class ChatWindow(QMainWindow):
         self.auth_worker = AuthWorker("upload", self.normalized_server_url(), token=self.token, query=path)
         self.auth_worker.succeeded.connect(lambda payload: self.send_file_reference(payload["file"]))
         self.auth_worker.failed.connect(self.show_search_error)
-        self.auth_worker.start()
+        self._start_auth_worker(self.auth_worker)
 
     def send_file_reference(self, file_info: dict[str, Any]) -> None:
         client_message_id = f"client-{uuid4().hex}"
         kind = "image" if str(file_info.get("content_type", "")).startswith("image/") else "file"
-        message = {"message_id": None, "client_message_id": client_message_id, "room_id": self.current_room, "sender": {"username": self.current_username}, "mine": True, "kind": kind, "text": "", "file": file_info, "status": "pending"}
+        message = {"message_id": None, "client_message_id": client_message_id, "room_id": self.current_room, "sender": {"username": self.current_username}, "mine": True, "kind": kind, "text": "", "file": file_info, "occurred_at": datetime.now(timezone.utc).isoformat(), "status": "pending"}
         self.room_messages.setdefault(self.current_room, []).append(message)
         self.render_current_room()
         if self.worker:
@@ -395,7 +356,7 @@ class ChatWindow(QMainWindow):
         worker.succeeded.connect(save_download)
         worker.failed.connect(self.show_search_error)
         self.auth_worker = worker
-        worker.start()
+        self._start_auth_worker(worker)
 
     def receive_typing(self, payload: dict[str, Any]) -> None:
         data = payload.get("data", {})
@@ -404,6 +365,8 @@ class ChatWindow(QMainWindow):
 
     def receive_presence(self, payload: dict[str, Any]) -> None:
         data = payload.get("data", {})
+        if data.get("room_id") != self.current_room:
+            return
         self.presence_status.setText(f"{data.get('username')} {'online' if data.get('online') else 'offline'}")
 
     def receive_status(self, payload: dict[str, Any]) -> None:
@@ -432,50 +395,6 @@ class ChatWindow(QMainWindow):
             self.worker.set_typing(self.current_room, False)
         self.is_typing = False
 
-    def clear_messages(self) -> None:
-        while self.message_layout.count():
-            item = self.message_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                while item.layout().count():
-                    child = item.layout().takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
-        self.message_layout.addStretch()
-
-    def render_current_room(self) -> None:
-        self.clear_messages()
-        for message in self.room_messages.get(self.current_room, []):
-            self.add_message_bubble(message)
-            message_id = message.get("message_id")
-            if self.worker and message_id and not message.get("mine") and message_id not in self.read_message_ids:
-                self.read_message_ids.add(message_id)
-                self.worker.mark_read(self.current_room, message_id)
-
-    def add_message_bubble(self, message: dict[str, Any]) -> QLabel:
-        row = QHBoxLayout()
-        sender = message.get("sender", {}).get("username", "Unknown")
-        is_mine = bool(message.get("mine")) or sender == self.current_username
-        display_sender = "You" if is_mine else sender
-        file_info = message.get("file")
-        display_text = message.get("text", "") or (file_info.get("name", "File") if file_info else "")
-        bubble = QLabel(f"{display_sender}: {display_text}\n{message.get('status', 'sent')}")
-        bubble.setWordWrap(True)
-        bubble.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        bubble.setStyleSheet("background: #e7f6ec; border-radius: 8px; padding: 10px;")
-        if is_mine:
-            row.addStretch()
-        row.addWidget(bubble)
-        if not is_mine:
-            row.addStretch()
-        self.message_layout.insertLayout(self.message_layout.count() - 1, row)
-        if file_info and file_info.get("file_id"):
-            download_button = QPushButton("Download")
-            download_button.clicked.connect(lambda _checked=False, value=file_info: self.download_file(value))
-            self.message_layout.insertWidget(self.message_layout.count() - 1, download_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        return bubble
-
     def receive_history(self, payload: dict[str, Any]) -> None:
         room_id = payload["room_id"]
         messages = self.room_messages.setdefault(room_id, [])
@@ -487,11 +406,14 @@ class ChatWindow(QMainWindow):
                 self.seen_message_ids.add(message.get("message_id"))
                 if isinstance(message.get("sequence_id"), int):
                     self.last_sequence_by_room[room_id] = max(self.last_sequence_by_room.get(room_id, 0), message["sequence_id"])
+        self.refresh_rooms()
         if room_id == self.current_room:
             self.render_current_room()
 
     def receive_message(self, payload: dict[str, Any]) -> None:
-        data = payload.get("data", {})
+        data = dict(payload.get("data", {}))
+        if payload.get("occurred_at"):
+            data["occurred_at"] = payload["occurred_at"]
         message_id = data.get("message_id")
         room_id = data.get("room_id")
         if not message_id or not room_id or message_id in self.seen_message_ids:
@@ -504,6 +426,7 @@ class ChatWindow(QMainWindow):
         else:
             data["mine"] = data.get("sender", {}).get("username") == self.current_username
             self.room_messages[room_id].append(data)
+        self.refresh_rooms()
         if room_id == self.current_room:
             self.render_current_room()
 
@@ -511,7 +434,7 @@ class ChatWindow(QMainWindow):
         data = payload.get("data", {})
         request_id = payload.get("request_id")
         message = next((item for messages in self.room_messages.values() for item in messages if item.get("client_message_id") == request_id), None)
-        if data.get("code") in {"RATE_LIMITED", "NOT_IN_ROOM", "INVALID_MESSAGE"}:
+        if data.get("code"):
             if message:
                 message["status"] = "failed"
                 if message.get("room_id") == self.current_room:
@@ -528,15 +451,35 @@ class ChatWindow(QMainWindow):
         self.show_error(f"{data.get('code', 'SERVER_ERROR')}: {data.get('message', 'Server error')}")
 
     def show_error(self, message: str) -> None:
-        self.error_label.setText(message)
+        if self.group_dialog.isVisible():
+            self.group_error.setText(message)
+            self.group_error.show()
+        elif self.members_dialog.isVisible():
+            self.member_error.setText(message)
+            self.member_error.show()
+        else:
+            self.error_label.setText(message)
+            self.error_label.show()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.cancel_connection()
+        if self._auth_workers:
+            event.ignore()
+            self.login_status.setText("Finishing current request…")
+            QTimer.singleShot(100, self.close)
+            return
         event.accept()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "resize_timer"):
+            self.resize_timer.start()
 
 
 def run() -> None:
     application = QApplication(sys.argv)
+    application.setStyle("Fusion")
+    application.setApplicationName("QuantumBytes Chat")
     window = ChatWindow()
     window.show()
     sys.exit(application.exec())

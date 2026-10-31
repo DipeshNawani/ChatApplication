@@ -93,14 +93,16 @@ Keep `DATABASE_PATH=server/data/chat.db` for local SQLite development.
 
 > ⚠️ **Never** put a hosted database URL or real credentials in `config.py`.
 
-### 🗄️ 3. Migrate the Database and Start the Server
+### 🗄️ 3. Start the Server
 
 ```powershell
-.venv\Scripts\python.exe -m alembic -c server\alembic.ini upgrade head
-.venv\Scripts\python.exe -m uvicorn app.main:socket_app --app-dir server --env-file server\.env --host 127.0.0.1 --port 8000
+.\start-server.ps1
 ```
 
-Leave the server running and open a second PowerShell terminal for a client.
+This loads `server/.env` and applies pending database migrations. You can also
+run `.venv\Scripts\python.exe server\run.py` directly. Leave the server running
+and open a second PowerShell terminal for a client. Both login and registration
+need this backend; launching a client alone does not start it.
 
 ### 🖥️ 4. Launch a Client
 
@@ -119,7 +121,21 @@ npm start
 Pop-Location
 ```
 
-In either client, enter **`http://127.0.0.1:8000`** as the server URL.
+For a new installation, the clients default to the hosted server, so no local
+backend is required for a multi-device chat. The server address is
+**`https://quantumbytes-chat.onrender.com`**.
+
+For local-only development, enter **`http://127.0.0.1:8000`** instead and run
+`start-server.ps1` on the same computer.
+
+To chat from different computers using Render, run a desktop client on each
+computer and enter **`https://quantumbytes-chat.onrender.com`** in the GUI's
+**Server address** field on both computers. Keep the normal client launch
+commands above; do not put the Render URL into `start-server.ps1`. The local
+server is not needed when the clients use Render. Each person registers an
+account on Render, then searches for the other username to start a chat.
+Local and Render accounts and message history belong to separate databases.
+The Render URL hosts the backend API, not the desktop interface.
 
 > 🔒 **Privacy by design:** client settings store only the server URL and username. Passwords are never saved, and authentication tokens stay in memory (or in the Electron main process).
 
@@ -162,6 +178,17 @@ npm ci
 npm run dist
 Pop-Location
 ```
+
+The rebuilt Windows packages are produced at:
+
+- `clients/electron/dist/QuantumBytes Chat-0.1.0-win.zip`
+- `dist/QuantumBytesChat.exe`
+
+Upload either file to a GitHub Release, Google Drive, OneDrive, or another
+file host. On each Windows computer, download and run the same client, leave
+the server address as **`https://quantumbytes-chat.onrender.com`**, and create
+an account on that hosted server. Do not upload `server/.env` or any database
+file; those may contain secrets or local-only data.
 
 > ℹ️ The Electron build is configured as a **portable ZIP**, because the local NSIS installer build exceeded the available memory-mapped archive limit.
 >

@@ -20,11 +20,19 @@ if (Test-Path server\data\chat.db) { Remove-Item server\data\chat.db -Force }
 .venv\Scripts\python.exe -m alembic -c server\alembic.ini upgrade head
 ```
 
-Start the server:
+Start the server (loads `server/.env` and applies pending migrations):
 
 ```powershell
-.venv\Scripts\python.exe -m uvicorn app.main:socket_app --app-dir server --env-file server/.env
+.\start-server.ps1
 ```
+
+Alternatively run `.venv\Scripts\python.exe server\run.py`. Keep the backend
+running while using either client and enter `http://127.0.0.1:8000` in the
+client's server address field. Starting a desktop client does not start the
+backend. You can check it at `http://127.0.0.1:8000/health`.
+
+Running `start-server.ps1` again detects a healthy backend already using the
+configured port and prints its address instead of starting a duplicate.
 
 `JWT_EXPIRE_MINUTES` defaults to 60. There are no refresh tokens. Uploaded
 files are written under `UPLOAD_DIRECTORY`; the Render filesystem is

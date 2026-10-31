@@ -5,11 +5,21 @@ const allowedEvents = new Set([
   'presence:changed', 'message:status', 'auth-error',
 ]);
 
+async function authenticate(channel, values) {
+  const result = await ipcRenderer.invoke(channel, values);
+  if (result.error) {
+    const error = new Error(result.error.message);
+    error.code = result.error.code;
+    throw error;
+  }
+  return result;
+}
+
 contextBridge.exposeInMainWorld('chatAPI', {
   loadSettings: () => ipcRenderer.invoke('settings:load'),
   saveSettings: values => ipcRenderer.invoke('settings:save', values),
-  login: values => ipcRenderer.invoke('auth:login', values),
-  register: values => ipcRenderer.invoke('auth:register', values),
+  login: values => authenticate('auth:login', values),
+  register: values => authenticate('auth:register', values),
   joinRoom: roomId => ipcRenderer.invoke('room:join', roomId),
   sendMessage: payload => ipcRenderer.invoke('message:send', payload),
   setTyping: payload => ipcRenderer.invoke('typing:set', payload),

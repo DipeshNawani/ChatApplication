@@ -2,11 +2,15 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { io } = require('socket.io-client');
+const { normalizeUrl, normalizeErrorPayload, createApiRequest } = require('./api-client');
 
 let windowRef;
 let socket;
 let token = '';
-let serverUrl = 'http://127.0.0.1:8000';
+// The hosted backend is the default so a newly installed client can connect
+// to other devices immediately. Existing saved settings still take priority.
+const DEFAULT_SERVER_URL = 'https://quantumbytes-chat.onrender.com';
+let serverUrl = DEFAULT_SERVER_URL;
 const pendingMessages = new Map();
 const activeRooms = new Set(['general']);
 const joinedRooms = new Set();
@@ -16,7 +20,10 @@ function settingsPath() {
 }
 
 function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(settingsPath(), 'utf8')); } catch { return {}; }
+  try {
+    const values = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
+    return { serverUrl: values.serverUrl || DEFAULT_SERVER_URL, username: values.username || '' };
+  } catch { return { serverUrl: DEFAULT_SERVER_URL, username: '' }; }
 }
 
 function saveSettings(values) {
@@ -26,41 +33,7 @@ function saveSettings(values) {
 
 function send(channel, payload) { if (windowRef) windowRef.webContents.send(channel, payload); }
 
-function normalizeUrl(value) {
-  const trimmed = String(value || '').trim();
-  return (trimmed.includes('://') ? trimmed : `http://${trimmed}`).replace(/\/$/, '');
-}
-
-function normalizeErrorPayload(payload) {
-  if (!payload) return { code: 'REQUEST_FAILED', message: 'Request failed' };
-  if (typeof payload === 'string') return { code: 'REQUEST_FAILED', message: payload };
-  if (payload.error && typeof payload.error === 'object') return payload.error;
-  if (payload.detail && typeof payload.detail === 'object') return payload.detail;
-  if (payload.code || payload.message) return payload;
-  return { code: 'REQUEST_FAILED', message: 'Request failed' };
-}
-
-async function apiRequest(pathname, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), pathname.startsWith('/api/v1/auth/') ? 90000 : 15000);
-  try {
-    const response = await fetch(`${serverUrl}${pathname}`, {
-      ...options,
-      signal: controller.signal,
-      headers: { ...(options.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const detail = normalizeErrorPayload(body);
-      const error = new Error(detail.message || 'Request failed');
-      error.code = detail.code || 'REQUEST_FAILED';
-      throw error;
-    }
-    return body;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+const apiRequest = createApiRequest({ getServerUrl: () => serverUrl, getToken: () => token });
 
 function connectSocket(username) {
   if (socket) socket.disconnect();
@@ -100,9 +73,20 @@ function connectSocket(username) {
   void username;
 }
 
+function resetConnection() {
+  socket?.disconnect();
+  socket = undefined;
+  token = '';
+  pendingMessages.clear();
+  joinedRooms.clear();
+  activeRooms.clear();
+  activeRooms.add('general');
+}
+
 async function createWindow() {
   windowRef = new BrowserWindow({
-    width: 1100, height: 720,
+    width: 1180, height: 780, minWidth: 860, minHeight: 600,
+    backgroundColor: '#f6f8f9', autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   await windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -110,41 +94,44 @@ async function createWindow() {
 
 ipcMain.handle('settings:load', () => loadSettings());
 ipcMain.handle('settings:save', (_event, values) => {
+  resetConnection();
   serverUrl = normalizeUrl(values.serverUrl);
   saveSettings({ serverUrl, username: values.username || loadSettings().username || '' });
-  token = '';
-  joinedRooms.clear();
-  activeRooms.clear();
-  activeRooms.add('general');
-  socket?.disconnect();
   return { serverUrl };
 });
-ipcMain.handle('auth:login', async (_event, values) => {
-  serverUrl = normalizeUrl(values.serverUrl);
-  const result = await apiRequest('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: values.username, password: values.password }) });
-  token = result.access_token;
-  saveSettings(values);
-  connectSocket(result.user.username);
-  return { username: result.user.username };
-});
-ipcMain.handle('auth:register', async (_event, values) => {
-  serverUrl = normalizeUrl(values.serverUrl);
-  const result = await apiRequest('/api/v1/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: values.username, password: values.password }) });
-  token = result.access_token;
-  saveSettings(values);
-  connectSocket(result.user.username);
-  return { username: result.user.username };
-});
+async function authenticate(mode, values) {
+  try {
+    const address = normalizeUrl(values.serverUrl);
+    resetConnection();
+    serverUrl = address;
+    const result = await apiRequest(`/api/v1/auth/${mode}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: values.username.trim(), password: values.password }),
+    });
+    if (!result?.access_token || !result.user?.username) {
+      return { error: { code: 'INVALID_SERVER_RESPONSE', message: 'This address did not return a valid chat login response.' } };
+    }
+    token = result.access_token;
+    saveSettings({ serverUrl, username: result.user.username });
+    connectSocket(result.user.username);
+    return { username: result.user.username };
+  } catch (error) {
+    return { error: { code: error.code || 'REQUEST_FAILED', message: error.message || 'Unable to sign in. Please try again.' } };
+  }
+}
+
+ipcMain.handle('auth:login', (_event, values) => authenticate('login', values));
+ipcMain.handle('auth:register', (_event, values) => authenticate('register', values));
 ipcMain.handle('room:join', (_event, roomId) => { activeRooms.add(roomId); socket?.emit('room:join', { data: { room_id: roomId } }); });
 ipcMain.handle('message:send', (_event, payload) => {
   const envelope = { data: payload, request_id: payload.client_message_id };
   pendingMessages.set(payload.client_message_id, envelope);
   if (socket?.connected && joinedRooms.has(payload.room_id)) socket.emit('message:send', envelope);
 });
-ipcMain.handle('typing:set', (_event, payload) => socket?.emit('typing:set', { data: payload }));
+ipcMain.handle('typing:set', (_event, payload) => { socket?.emit('typing:set', { data: payload }); });
 ipcMain.handle('history:load', (_event, roomId, after) => apiRequest(`/api/v1/rooms/${encodeURIComponent(roomId)}/messages?limit=50${after ? `&after=${after}` : ''}`));
 ipcMain.handle('history:older', (_event, roomId, before) => apiRequest(`/api/v1/rooms/${encodeURIComponent(roomId)}/messages?limit=50&before=${before}`));
-ipcMain.handle('message:read', (_event, roomId, messageId) => socket?.emit('message:read', { data: { room_id: roomId, message_id: messageId } }));
+ipcMain.handle('message:read', (_event, roomId, messageId) => { socket?.emit('message:read', { data: { room_id: roomId, message_id: messageId } }); });
 ipcMain.handle('users:search', (_event, query) => apiRequest(`/api/v1/users/search?q=${encodeURIComponent(query)}`));
 ipcMain.handle('chat:direct', (_event, username) => apiRequest('/api/v1/chats/direct', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) }));
 ipcMain.handle('rooms:list', () => apiRequest('/api/v1/rooms'));

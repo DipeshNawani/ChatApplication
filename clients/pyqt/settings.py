@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 SETTINGS_PATH = Path(os.getenv("APPDATA", Path.home())) / "QuantumBytesChat" / "settings.json"
-DEFAULT_SETTINGS = {"server_url": "http://127.0.0.1:8000", "username": ""}
+DEFAULT_SETTINGS = {"server_url": "https://quantumbytes-chat.onrender.com", "username": ""}
 
 
 def load_settings() -> dict[str, str]:
