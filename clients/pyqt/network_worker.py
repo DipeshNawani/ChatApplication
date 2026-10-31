@@ -73,7 +73,10 @@ class SocketWorker(QThread):
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
     async def _connection_loop(self) -> None:
-        client = socketio.AsyncClient(reconnection=False, request_timeout=5)
+        # Start with polling and allow Engine.IO to upgrade to WebSocket. Some
+        # hosted proxies (including a sleeping Render instance) reject a
+        # direct WebSocket handshake even though polling is available.
+        client = socketio.AsyncClient(reconnection=False, request_timeout=30)
         self._client = client
         disconnect_event = asyncio.Event()
         self._disconnect_event = disconnect_event
@@ -160,7 +163,12 @@ class SocketWorker(QThread):
             disconnect_event.clear()
             try:
                 auth = {"token": self.token} if self.token else {"username": self.username}
-                await client.connect(self.server_url, auth=auth, transports=["websocket", "polling"])
+                await client.connect(
+                    self.server_url,
+                    auth=auth,
+                    transports=["polling", "websocket"],
+                    wait_timeout=30,
+                )
                 attempt = 0
                 self._joined_rooms.clear()
                 self.connection_state_changed.emit("Connected")
@@ -199,7 +207,9 @@ class SocketWorker(QThread):
                         f"{self.server_url}/api/v1/rooms/{room_id}/messages",
                         params=params,
                         headers={"Authorization": f"Bearer {self.token}"},
-                        timeout=5,
+                        # Render may be waking from its free-tier idle state;
+                        # history can take longer than the socket handshake.
+                        timeout=30,
                     ) as response:
                         if response.status == 401:
                             self.authentication_failed.emit("TOKEN_EXPIRED")
@@ -216,8 +226,20 @@ class SocketWorker(QThread):
                         if not payload.get("has_more"):
                             return
                         params["after"] = str(self._last_sequence_by_room[room_id])
+        except asyncio.TimeoutError:
+            self.server_error.emit({
+                "data": {
+                    "code": "HISTORY_TIMEOUT",
+                    "message": f"The server at {self.server_url} took too long to load message history. Please try again.",
+                }
+            })
         except Exception as error:
-            self.server_error.emit({"data": {"code": "HISTORY_ERROR", "message": str(error)}})
+            self.server_error.emit({
+                "data": {
+                    "code": "HISTORY_ERROR",
+                    "message": str(error) or "The server could not load message history. Please try again.",
+                }
+            })
 
     async def _restore_connection(self) -> None:
         if not self._client:

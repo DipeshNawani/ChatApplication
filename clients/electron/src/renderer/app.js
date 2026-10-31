@@ -228,7 +228,16 @@ async function leaveGroup() {
   catch (error) { document.querySelector('#member-error').textContent = error.message || 'Could not leave this group.'; }
 }
 function showError(error) { const target = document.querySelector('#errors'); if (target) target.textContent = error.message || 'Something went wrong. Please try again.'; }
-window.chatAPI.on('connection-state', value => { state.status = value; const status = document.querySelector('#status'); if (status) status.textContent = value; const dot = document.querySelector('#connection-dot'); if (dot) dot.classList.toggle('online', value === 'Connected'); });
+window.chatAPI.on('connection-state', value => {
+  state.status = value;
+  // Socket.IO can begin connecting before the login request finishes. Keep
+  // those transient states out of the login form; show them in the workspace
+  // only after the authenticated chat view has been rendered.
+  const status = document.querySelector('#status');
+  if (status && document.querySelector('#messages')) status.textContent = value;
+  const dot = document.querySelector('#connection-dot');
+  if (dot) dot.classList.toggle('online', value === 'Connected');
+});
 window.chatAPI.on('message:created', payload => addMessage({ ...payload.data, occurred_at: payload.occurred_at }));
 window.chatAPI.on('message:ack', payload => {
   const data = payload.data || {}; const message = [...state.messages.values()].flat().find(item => item.client_message_id === payload.request_id);
